@@ -94,9 +94,15 @@ def get_active_hand(frame):
     if frame ['primary_hand']:
         return frame['primary_hand']
     elif frame["hands"] == None:
-        return first_hand
+        return #first_hand
     else:
         return None
+    
+def active_target(point, boxes, center):
+    if point is inside_box(boxes):
+        return boxes[boxes['id']]
+    else:
+        pass
     
 def what_gesture(hand):
     states = finger_states(hand)
@@ -155,3 +161,54 @@ def process_frame(frame):
                 "Perform a gesture with a hand"
             ],
         }
+    
+
+def target_operation(frame, target_id):
+    if target_id == 'red':
+        operation = index_operation(frame, 0)
+    if target_id == 'green':
+        operation == index_operation(frame, 1)
+    if target_id == 'blue':
+        operation = index_operation(frame, 2)
+
+    if operation is None:
+        return None
+    
+    return {
+        'target_id': target_id,
+        'operation_id': operation.id,
+        'operation_name': operation.name,
+    }
+
+def frame_by_frame(frame):
+
+    now = frame['timestamp_ms']
+    hand = get_active_hand(frame)
+
+    if hand is None:
+        current_target == None
+        return 'no hand detected'
+    
+    gesture = what_gesture(hand)
+    point = hand['indexTip']
+    center, boxes = box_centers(frame)
+
+    if boxes() == None:
+        return 'no targets available'
+    
+    target_id = active_target(point, boxes, center)
+
+    if target_id != current_target:
+        current_target = target_id
+        start_time = now
+        STABILITY.clear()
+    else:
+        STABILITY += current_target
+
+        dwell_time = now - start_time
+
+        target_commit = (start_time > COMMIT_DWELL_MS) and (STABILITY counter >= required_stable_frames)
+
+
+
+
