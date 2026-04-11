@@ -46,6 +46,8 @@ last_added_target = None
 last_confirm_time = 0
 last_clear_time = 0
 STABILITY = {}
+COMMIT_DWELL_MS = 800
+
 
 #setup for global variables
 def setup(payload):
@@ -57,21 +59,33 @@ def setup(payload):
     current_target = None
     return {
         'status': 'Object queueing plugin ready',
-        'available': len(payload.get("saved_operations", [])),
+        'available': len(payload.get("savedOperations", [])),
     }
 
 # helper to fetch a saved operation from manual
 def index_operation(frame,index):
-    saved = frame.get("saved_operations", [])
+    saved = frame.get("savedOperations", [])
     if index is None or index < 0 or index >= len(saved):
         return None
     return saved[index]
 
 def finger_states(hand):
-    return hand.get('fingerstates') or {}
+    return hand.get('fingerStates') or {}
 
 def hand_label(hand):
-    return hand.get('handedness') or hand.get('viewerside') or 'Unknown'
+    return hand.get('handedness') or hand.get('viewerSide') or 'Unknown'
+
+def update_stability(target_id):
+    global STABILITY
+
+    if target_id is None:
+        STABILITY = {}
+        return 0
+    
+    next_counts = {}
+    next_counts[target_id] = STABILITY.get(target_id, 0) + 1
+    STABILITY = next_counts
+    return STABILITY[target_id]
 
 def count_no_thumb(hand):
     runtime_value = hand.get('fingerCountNoThumb')
@@ -91,18 +105,34 @@ def count_with_thumb(hand):
     return count_no_thumb(hand) + (1 if states.get('thumbExtended') else 0)
 
 def get_active_hand(frame):
-    if frame ['primary_hand']:
-        return frame['primary_hand']
-    elif frame["hands"] == None:
-        return #first_hand
-    else:
-        return None
+    primary = frame.get("primaryHand")
+    if primary:
+        return primary
     
-def active_target(point, boxes, center):
-    if point is inside_box(boxes):
-        return boxes[boxes['id']]
-    else:
-        pass
+    hands = frame.get('hands', [])
+    if hands:
+        return hands[0]
+    
+    return None
+    
+def active_target(point, boxes, centers):
+    for box_id, box in boxes.items():
+        if inside_box(point, box):
+            return box_id
+        
+    closest_id = None
+    closest_dist = None
+
+    for box_id, center in centers.items():
+        dx = point['x'] - center['x']
+        dy = point['y'] - center['y']
+        dist_sq = dx * dx + dy * dy
+
+        if closest_dist is None or dist_sq < closest_dist:
+            closest_dist = dist_sq
+            closest_id = box_id
+            
+    return closest_id
     
 def what_gesture(hand):
     states = finger_states(hand)
@@ -132,43 +162,28 @@ def what_gesture(hand):
 def box_centers(frame):
     center = {}
     boxes = {}
-    for box in frame.get("bayes_boxes", {}).get('boxes', []):
+    for box in frame.get("bayesBoxes", {}).get('boxes', []):
         center[box['id']] = {
             'x': box['x'] + box['width'] * 0.5,
             'y': box['y'] + box['height'] * 0.5,
         }
         boxes[box['id']] = box
-        return center, boxes
+    return center, boxes
     
 def inside_box(point, box):
     return (
         box['x'] <= point['x'] <= box['x'] + box['width']
         and box['y'] <= point['y'] <= box['y'] + box['height']
     )
-
-
-def process_frame(frame):
-    global LAST_TRIGGER_AT, LAST_TRIGGER_KEY, STABILITY
-
-    hand = frame.get("primary_hand")
-    if not hand:
-        LAST_TRIGGER_KEY = None
-        STABILITY = {}
-        return {
-            "label": "No hand detected",
-            "confidence": 0.5,
-            "debug_text": [
-                "Perform a gesture with a hand"
-            ],
-        }
     
-
 def target_operation(frame, target_id):
+    operation = None
+
     if target_id == 'red':
         operation = index_operation(frame, 0)
-    if target_id == 'green':
-        operation == index_operation(frame, 1)
-    if target_id == 'blue':
+    elif target_id == 'green':
+        operation = index_operation(frame, 1)
+    elif target_id == 'blue':
         operation = index_operation(frame, 2)
 
     if operation is None:
@@ -176,39 +191,60 @@ def target_operation(frame, target_id):
     
     return {
         'target_id': target_id,
-        'operation_id': operation.id,
-        'operation_name': operation.name,
+        'operation_id': operation['id'],
+        'operation_name': operation['name'],
     }
 
-def frame_by_frame(frame):
+def processframeframe(frame):
+    global current_target, start_time, STABILITY
 
-    now = frame['timestamp_ms']
+    now = frame.get('timestampMs', 0)
     hand = get_active_hand(frame)
 
     if hand is None:
-        current_target == None
-        return 'no hand detected'
+        current_target = None
+        STABILITY = {}
+        return {
+            "label": 'No hand detected',
+            "confidence": 0.0,
+            "warning": ['show one hand to the webcam']
+        }
     
-    gesture = what_gesture(hand)
-    point = hand['indexTip']
-    center, boxes = box_centers(frame)
+    gesture,confidence = what_gesture(hand)
+    point = hand.get('indexTip') or hand.get('palmCenter')
+    if point is None:
+        return {
+            "label": "No point available",
+            "confidence": 0.0,
+            "warning": ['could not read fingers or palm']
+        }
 
-    if boxes() == None:
-        return 'no targets available'
+    centers, boxes = box_centers(frame)
+
+    if not boxes:
+        return {
+            "label": 'No targets available',
+            "confidence": 0.0,
+            "warning":['no bayesBoxes were found in the camera frame']
+        }
     
-    target_id = active_target(point, boxes, center)
+    target_id = active_target(point, boxes, centers)
 
     if target_id != current_target:
         current_target = target_id
         start_time = now
-        STABILITY.clear()
+        STABILITY = {target_id: 1} if target_id is not None else {}
+        stable_frames = STABILITY.get(target_id, 0)
     else:
-        STABILITY += current_target
-
-        dwell_time = now - start_time
-
-        target_commit = (start_time > COMMIT_DWELL_MS) and (STABILITY counter >= required_stable_frames)
-
-
-
-
+        stable_frames = update_stability(target_id)
+    
+    dwell_time = now - start_time
+    target_commit = (target_id is not None and dwell_time >= COMMIT_DWELL_MS and stable_frames >= required_stable_frames)
+    return {
+        "label": f'Target {target_id} ({gesture})',
+        "confidence": confidence,
+        "warning": [f'Stable frames: {stable_frames}', 
+                    f'Dwell time: {dwell_time}',
+                    f'committed: {target_commit}',
+                    ]
+    }
